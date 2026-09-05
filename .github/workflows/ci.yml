@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - services/platform
+          - services/venue
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: |
+            services/platform/go.sum
+            services/venue/go.sum
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.0
+          working-directory: ${{ matrix.module }}
+          args: --config=../../.golangci.yml
+
+  test:
+    name: test (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - services/platform
+          - services/venue
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: |
+            services/platform/go.sum
+            services/venue/go.sum
+      - name: Unit tests with race detector
+        working-directory: ${{ matrix.module }}
+        run: go test -race -count=1 ./...
+      - name: Go vet
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+
+  integration:
+    name: PostgreSQL and Compose integration
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: services/platform/go.sum
+      - name: Prepare runtime environment
+        run: cp .env.example .env
+      - name: Start application
+        run: docker compose up -d --build --wait
+      - name: Run PostgreSQL and cross-service tests
+        run: |
+          set -a
+          . ./.env
+          set +a
+          go test -count=1 -v ./services/platform/internal/repository/postgres ./services/platform/integration
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Stop application
+        if: always()
+        run: docker compose down -v

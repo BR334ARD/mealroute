@@ -1,0 +1,1170 @@
+openapi: 3.0.3
+info:
+  title: MealRoute API
+  version: 0.1.0
+  description: |
+    API основного (platform) сервиса для поиска заведений, заказа доставки еды
+    и интеграции с demo-заведением.
+
+    Все пути в этом документе принадлежат основному сервису. `/api/v1/*` —
+    интерфейс web-клиента, `/partner/v1/*` — закрытый интерфейс основного
+    сервиса, который вызывает отдельный сервис заведения. Контракт самого
+    demo-заведения находится в `venue-openapi.yaml`.
+
+    Контракт намеренно не включает аутентификацию пользователей и web-клиент.
+    `X-User-Id` — демонстрационный идентификатор пользователя, который в MVP
+    передаётся вызывающей стороной и не проверяется. Partner API закрыт API-ключом
+    заведения: ключ однозначно определяет venue и ограничивает выдачу только его
+    заказами. Денежные значения передаются в копейках.
+
+    Platform — источник истины для заказов и истории их статусов; venue —
+    источник снимка меню, цены и наличия. Изменения заказов venue получает из
+    `GET /partner/v1/order-events` с семантикой at-least-once.
+servers:
+  - url: http://localhost:8080
+    description: Локальный запуск
+tags:
+  - name: System
+    description: Служебные endpoints основного сервиса
+  - name: Customer
+    description: Сценарии web-клиента пользователя
+  - name: Partner
+    description: Эндпоинты основного сервиса, которые вызывает demo-заведение
+paths:
+  /healthz:
+    get:
+      tags: [System]
+      summary: Проверить готовность основного сервиса
+      description: Используется Docker Compose healthcheck и локальной диагностикой.
+      operationId: getPlatformHealth
+      responses:
+        '200':
+          description: Сервис готов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/v1/venues:
+    get:
+      tags: [Customer]
+      summary: Найти доступные заведения
+      description: CJM пользователя — поиск заведения перед просмотром меню.
+      operationId: listVenues
+      parameters:
+        - $ref: '#/components/parameters/City'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Страница заведений
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VenuePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/venues/{venueId}:
+    get:
+      tags: [Customer]
+      summary: Получить карточку заведения
+      description: CJM пользователя — открыть карточку выбранного заведения.
+      operationId: getVenue
+      parameters:
+        - $ref: '#/components/parameters/VenueId'
+      responses:
+        '200':
+          description: Карточка заведения
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Venue'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/venues/{venueId}/menu:
+    get:
+      tags: [Customer]
+      summary: Получить доступное меню заведения
+      description: |
+        CJM пользователя — выбрать товары. Возвращаются только актуальные товары
+        с `available: true`; недоступные товары не попадают в пользовательский
+        каталог.
+      operationId: getVenueMenu
+      parameters:
+        - $ref: '#/components/parameters/VenueId'
+      responses:
+        '200':
+          description: Актуальное меню
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Menu'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/orders:
+    get:
+      tags: [Customer]
+      summary: Получить заказы пользователя
+      description: CJM пользователя — открыть историю и текущие заказы.
+      operationId: listCustomerOrders
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Страница заказов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      tags: [Customer]
+      summary: Создать заказ
+      description: |
+        CJM пользователя — подтвердить корзину и адрес доставки. Операция
+        идемпотентна в пределах `Idempotency-Key`. Платформа повторно проверяет
+        доступность заведения, версию меню и цены перед созданием заказа.
+        Финальная проверка `menuVersion` и запись заказа сериализованы с menu
+        sync одной транзакционной блокировкой: заказ не может создаться из
+        устаревшего снимка во время публикации новой версии.
+      operationId: createOrder
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Заказ создан и ожидает подтверждения заведением
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Повторный ключ с другим содержимым или конфликт версии меню
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '422':
+          description: Товар недоступен, заведение закрыто или цена изменилась
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/orders/{orderId}:
+    get:
+      tags: [Customer]
+      summary: Получить заказ и его статус
+      description: CJM пользователя — следить за исполнением заказа.
+      operationId: getCustomerOrder
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: Заказ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/orders/{orderId}/cancel:
+    post:
+      tags: [Customer]
+      summary: Отменить заказ
+      description: |
+        CJM пользователя — отменить заказ до начала приготовления. Отмена
+        допустима в состояниях `pending_confirmation` и `accepted`; после
+        перехода в `preparing` API возвращает конфликт состояния. После успешной
+        отмены platform добавляет событие в журнал заведения.
+      operationId: cancelCustomerOrder
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelOrderRequest'
+      responses:
+        '200':
+          description: Заказ отменён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Заказ уже нельзя отменить или ключ использован повторно
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /partner/v1/menu:
+    put:
+      tags: [Partner]
+      summary: Синхронизировать снимок меню
+      description: |
+        CJM заведения — опубликовать меню и наличие товаров. API-ключ определяет
+        заведение. Снимок с уже применённой или меньшей версией не меняет данные;
+        это делает повторную доставку безопасной. Применение снимка атомарно и
+        сериализовано с финальной проверкой версии при создании заказа.
+      operationId: syncPartnerMenu
+      security:
+        - venueApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MenuSyncRequest'
+      responses:
+        '200':
+          description: Снимок меню принят
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuSyncResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Версия меню конфликтует с текущим состоянием
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '422':
+          description: Меню не прошло проверку
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /partner/v1/orders:
+    get:
+      tags: [Partner]
+      summary: Получить заказы заведения для обработки
+      description: |
+        Вспомогательный снимок заказов текущего заведения. Без фильтра статуса
+        возвращаются только `pending_confirmation`; это удобно для первичного
+        получения новых заказов. Для надёжной инкрементальной синхронизации,
+        включая отмену принятого заказа, использовать `order-events`.
+      operationId: listPartnerOrders
+      security:
+        - venueApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/PartnerOrderStatus'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Страница заказов заведения
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /partner/v1/order-events:
+    get:
+      tags: [Partner]
+      summary: Получить журнал изменений заказов заведения
+      description: |
+        Основной polling-канал CJM заведения. API-ключ ограничивает события
+        одним заведением. Cursor непрозрачен. Demo-venue обрабатывает события
+        независимо: временно не применившееся событие попадает в локальную
+        очередь повторов и не блокирует более новые события страницы. Снимок,
+        чей `updatedAt` не новее локального заказа, игнорируется как устаревший.
+        Возможна повторная доставка, поэтому обработчик идемпотентен по
+        `eventId`, а повтор partner-команд защищён `Idempotency-Key`.
+      operationId: listPartnerOrderEvents
+      security:
+        - venueApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Упорядоченная страница событий конкретного заведения
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderEventPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /partner/v1/orders/{orderId}/accept:
+    post:
+      tags: [Partner]
+      summary: Подтвердить заказ заведением
+      description: |
+        CJM заведения — принять заказ в работу и закрепить его локальный
+        `venueOrderId`. Повторный запрос с тем же ключом и тем же телом
+        возвращает ранее зафиксированный заказ.
+      operationId: acceptPartnerOrder
+      security:
+        - venueApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptOrderRequest'
+      responses:
+        '200':
+          description: Заказ принят
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Недопустимый переход статуса или повторный ключ с другим телом
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /partner/v1/orders/{orderId}/reject:
+    post:
+      tags: [Partner]
+      summary: Отклонить заказ заведением
+      description: CJM заведения — сообщить, что заказ не может быть выполнен.
+      operationId: rejectPartnerOrder
+      security:
+        - venueApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectOrderRequest'
+      responses:
+        '200':
+          description: Заказ отклонён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Недопустимый переход статуса или повторный ключ с другим телом
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /partner/v1/orders/{orderId}/status:
+    post:
+      tags: [Partner]
+      summary: Обновить статус заказа
+      description: |
+        CJM заведения — сообщить о приготовлении и передаче заказа в доставку.
+        Заведение может переводить заказ только вперёд: `preparing` → `ready` →
+        `delivering` → `delivered`.
+      operationId: updatePartnerOrderStatus
+      security:
+        - venueApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOrderStatusRequest'
+      responses:
+        '200':
+          description: Статус обновлён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Недопустимый переход статуса или повторный ключ с другим телом
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  securitySchemes:
+    venueApiKey:
+      type: apiKey
+      in: header
+      name: X-Venue-API-Key
+      description: Демонстрационный ключ закрытого доступа конкретного заведения.
+  parameters:
+    City:
+      name: city
+      in: query
+      required: false
+      description: Фильтр по городу.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 100
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Максимальное число элементов на странице.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 100
+        default: 20
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Непрозрачный курсор следующей страницы.
+      schema:
+        type: string
+        minLength: 1
+    UserId:
+      name: X-User-Id
+      in: header
+      required: true
+      description: Демонстрационный идентификатор пользователя; не является токеном авторизации.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Ключ повторяемой команды. Его область — субъект (`X-User-Id` или venue
+        API key) и конкретная операция. Повтор того же тела возвращает ранее
+        зафиксированный результат; тот же ключ с другим телом возвращает
+        `409 idempotency_key_reused`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    VenueId:
+      name: venueId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PartnerOrderStatus:
+      name: status
+      in: query
+      required: false
+      description: Фильтр по статусу; по умолчанию `pending_confirmation`.
+      schema:
+        type: string
+        enum:
+          - pending_confirmation
+          - accepted
+          - preparing
+          - ready
+          - delivering
+          - delivered
+          - rejected
+          - cancelled
+        default: pending_confirmation
+  responses:
+    BadRequest:
+      description: Некорректный запрос
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    Unauthorized:
+      description: Отсутствует или неверен API-ключ заведения
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    NotFound:
+      description: Ресурс не найден
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    InternalServerError:
+      description: Внутренняя ошибка сервиса
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        service:
+          type: string
+          example: platform
+        version:
+          type: string
+          example: 0.1.0
+      additionalProperties: false
+
+    ProblemDetails:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Машиночитаемый код ошибки.
+          example: item_unavailable
+        message:
+          type: string
+          description: Сообщение для журналов и отображения пользователю.
+        details:
+          type: object
+          additionalProperties: true
+          description: Дополнительные поля ошибки, зависящие от `code`.
+      additionalProperties: false
+
+    VenuePage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/VenueSummary'
+        nextCursor:
+          type: string
+          nullable: true
+          description: Курсор следующей страницы; `null`, если страницы больше нет.
+      additionalProperties: false
+
+    VenueSummary:
+      type: object
+      required: [id, name, kind, city, status, isOpen]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        kind:
+          $ref: '#/components/schemas/VenueKind'
+        city:
+          type: string
+          minLength: 1
+          maxLength: 100
+        status:
+          $ref: '#/components/schemas/VenueStatus'
+        isOpen:
+          type: boolean
+          description: Можно ли принять новый заказ прямо сейчас.
+      additionalProperties: false
+
+    Venue:
+      type: object
+      required: [id, name, kind, city, status, isOpen, address, menuVersion, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        kind:
+          $ref: '#/components/schemas/VenueKind'
+        city:
+          type: string
+          minLength: 1
+          maxLength: 100
+        status:
+          $ref: '#/components/schemas/VenueStatus'
+        isOpen:
+          type: boolean
+        address:
+          type: string
+          minLength: 1
+          maxLength: 300
+        menuVersion:
+          type: integer
+          format: int64
+          minimum: 0
+        updatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    VenueKind:
+      type: string
+      enum: [restaurant, cafe, store]
+
+    VenueStatus:
+      type: string
+      enum: [active, suspended]
+
+    Menu:
+      type: object
+      required: [venueId, version, currency, categories, updatedAt]
+      properties:
+        venueId:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          format: int64
+          minimum: 0
+        currency:
+          type: string
+          enum: [RUB]
+        categories:
+          type: array
+          items:
+            $ref: '#/components/schemas/MenuCategory'
+        updatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    MenuCategory:
+      type: object
+      required: [id, name, items]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        sortOrder:
+          type: integer
+          format: int32
+          default: 0
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MenuItem'
+      additionalProperties: false
+
+    MenuItem:
+      type: object
+      required: [id, name, price, available]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Стабильный публичный идентификатор товара платформы.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          nullable: true
+          maxLength: 2000
+        price:
+          $ref: '#/components/schemas/Money'
+        available:
+          type: boolean
+        sortOrder:
+          type: integer
+          format: int32
+          default: 0
+        tags:
+          type: array
+          items:
+            type: string
+            maxLength: 50
+      additionalProperties: false
+
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000
+          description: Сумма в минимальных единицах валюты (для RUB — копейки).
+          example: 45900
+        currency:
+          type: string
+          enum: [RUB]
+      additionalProperties: false
+
+    CreateOrderRequest:
+      type: object
+      required: [venueId, menuVersion, items, deliveryAddress]
+      properties:
+        venueId:
+          type: string
+          format: uuid
+        menuVersion:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Версия меню, из которой пользователь собрал корзину.
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/OrderItemInput'
+        deliveryAddress:
+          $ref: '#/components/schemas/DeliveryAddress'
+        customerComment:
+          type: string
+          nullable: true
+          maxLength: 1000
+      additionalProperties: false
+
+    OrderItemInput:
+      type: object
+      required: [productId, quantity]
+      properties:
+        productId:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 99
+      additionalProperties: false
+
+    DeliveryAddress:
+      type: object
+      required: [city, addressLine]
+      properties:
+        city:
+          type: string
+          minLength: 1
+          maxLength: 100
+        addressLine:
+          type: string
+          minLength: 1
+          maxLength: 300
+        apartment:
+          type: string
+          nullable: true
+          maxLength: 30
+        entrance:
+          type: string
+          nullable: true
+          maxLength: 30
+        floor:
+          type: string
+          nullable: true
+          maxLength: 30
+        comment:
+          type: string
+          nullable: true
+          maxLength: 500
+      additionalProperties: false
+
+    OrderPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Order'
+        nextCursor:
+          type: string
+          nullable: true
+      additionalProperties: false
+
+    OrderEventPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderEvent'
+        nextCursor:
+          type: string
+          nullable: true
+          description: |
+            Сохранить после применения событий страницы или постановки
+            временно неуспешных событий в локальную очередь повторов.
+      additionalProperties: false
+
+    OrderEvent:
+      type: object
+      required: [eventId, type, occurredAt, order]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+          description: Стабильный ID события для дедупликации на стороне venue.
+        type:
+          $ref: '#/components/schemas/OrderEventType'
+        occurredAt:
+          type: string
+          format: date-time
+        order:
+          $ref: '#/components/schemas/Order'
+      additionalProperties: false
+
+    OrderEventType:
+      type: string
+      description: Причина публикации нового снимка заказа в журнале заведения.
+      enum: [created, accepted, rejected, cancelled, status_changed]
+
+    Order:
+      type: object
+      required:
+        - id
+        - venueId
+        - venueName
+        - status
+        - items
+        - subtotal
+        - deliveryFee
+        - total
+        - deliveryAddress
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        venueId:
+          type: string
+          format: uuid
+        venueName:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        subtotal:
+          $ref: '#/components/schemas/Money'
+        deliveryFee:
+          $ref: '#/components/schemas/Money'
+        total:
+          $ref: '#/components/schemas/Money'
+        deliveryAddress:
+          $ref: '#/components/schemas/DeliveryAddress'
+        customerComment:
+          type: string
+          nullable: true
+        statusHistory:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderStatusChange'
+        estimatedReadyAt:
+          type: string
+          format: date-time
+          nullable: true
+        rejectionReason:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 500
+          description: Заполняется platform только для заказа в статусе rejected.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    OrderItem:
+      type: object
+      required: [productId, name, quantity, unitPrice, totalPrice]
+      properties:
+        productId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Снимок названия на момент создания заказа.
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+        unitPrice:
+          $ref: '#/components/schemas/Money'
+        totalPrice:
+          $ref: '#/components/schemas/Money'
+      additionalProperties: false
+
+    OrderStatus:
+      type: string
+      description: |
+        Жизненный цикл заказа: pending_confirmation → accepted → preparing →
+        ready → delivering → delivered. Из pending_confirmation также возможны
+        rejected и cancelled; из accepted возможен cancelled до начала приготовления.
+      enum:
+        - pending_confirmation
+        - accepted
+        - preparing
+        - ready
+        - delivering
+        - delivered
+        - rejected
+        - cancelled
+
+    OrderStatusChange:
+      type: object
+      required: [status, source, changedAt]
+      properties:
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        source:
+          type: string
+          enum: [customer, platform, venue]
+        reason:
+          type: string
+          nullable: true
+          maxLength: 500
+        changedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    CancelOrderRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          nullable: true
+          maxLength: 500
+      additionalProperties: false
+
+    MenuSyncRequest:
+      type: object
+      required: [menuVersion, categories]
+      properties:
+        menuVersion:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Монотонно возрастающая версия меню в системе заведения.
+        categories:
+          type: array
+          maxItems: 100
+          description: externalCategoryId и externalItemId должны быть уникальны в пределах снимка.
+          items:
+            $ref: '#/components/schemas/MenuCategoryInput'
+      additionalProperties: false
+
+    MenuCategoryInput:
+      type: object
+      required: [externalCategoryId, name, items]
+      properties:
+        externalCategoryId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        sortOrder:
+          type: integer
+          format: int32
+          default: 0
+        items:
+          type: array
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/MenuItemInput'
+      additionalProperties: false
+
+    MenuItemInput:
+      type: object
+      required: [externalItemId, name, price, available]
+      properties:
+        externalItemId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Идентификатор товара в системе заведения.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          nullable: true
+          maxLength: 2000
+        price:
+          $ref: '#/components/schemas/Money'
+        available:
+          type: boolean
+        sortOrder:
+          type: integer
+          format: int32
+          default: 0
+        tags:
+          type: array
+          items:
+            type: string
+            maxLength: 50
+      additionalProperties: false
+
+    MenuSyncResponse:
+      type: object
+      required: [venueId, menuVersion, acceptedAt, items]
+      properties:
+        venueId:
+          type: string
+          format: uuid
+        menuVersion:
+          type: integer
+          format: int64
+        acceptedAt:
+          type: string
+          format: date-time
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MenuItemMapping'
+      additionalProperties: false
+
+    MenuItemMapping:
+      type: object
+      required: [externalItemId, productId]
+      properties:
+        externalItemId:
+          type: string
+        productId:
+          type: string
+          format: uuid
+      additionalProperties: false
+
+    AcceptOrderRequest:
+      type: object
+      required: [venueOrderId]
+      properties:
+        estimatedPreparationMinutes:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 240
+        venueOrderId:
+          type: string
+          maxLength: 128
+          description: Идентификатор заказа в системе заведения.
+      additionalProperties: false
+
+    RejectOrderRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum: [out_of_stock, venue_closed, technical_issue, other]
+        comment:
+          type: string
+          nullable: true
+          maxLength: 500
+      additionalProperties: false
+
+    UpdateOrderStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [preparing, ready, delivering, delivered]
+      additionalProperties: false

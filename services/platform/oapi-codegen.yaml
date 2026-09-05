@@ -1,0 +1,8 @@
+package: platformapi
+output: internal/api/platform/openapi.gen.go
+generate:
+  models: true
+  std-http-server: true
+  embedded-spec: true
+output-options:
+  response-type-suffix: ResponseObject

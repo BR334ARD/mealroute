@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: "${POSTGRES_IMAGE}"
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB}"
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    ports:
+      - "${POSTGRES_HOST_PORT}:${POSTGRES_PORT}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./services/platform/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: "${HEALTHCHECK_INTERVAL}"
+      timeout: "${HEALTHCHECK_TIMEOUT}"
+      retries: ${HEALTHCHECK_RETRIES}
+
+  platform:
+    build:
+      context: .
+      dockerfile: services/platform/Dockerfile
+    environment:
+      PLATFORM_ADDR: "${PLATFORM_ADDR}"
+      PLATFORM_READ_HEADER_TIMEOUT: "${PLATFORM_READ_HEADER_TIMEOUT}"
+      PLATFORM_WRITE_TIMEOUT: "${PLATFORM_WRITE_TIMEOUT}"
+      PLATFORM_IDLE_TIMEOUT: "${PLATFORM_IDLE_TIMEOUT}"
+      PLATFORM_SHUTDOWN_TIMEOUT: "${PLATFORM_SHUTDOWN_TIMEOUT}"
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=${POSTGRES_SSLMODE}"
+      VENUE_ID: "${VENUE_ID}"
+      VENUE_API_KEY: "${VENUE_API_KEY}"
+    ports:
+      - "${PLATFORM_HOST_PORT}:${PLATFORM_PORT}"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "${PLATFORM_HEALTHCHECK_URL}"]
+      interval: "${HEALTHCHECK_INTERVAL}"
+      timeout: "${HEALTHCHECK_TIMEOUT}"
+      retries: ${HEALTHCHECK_RETRIES}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  venue:
+    build:
+      context: .
+      dockerfile: services/venue/Dockerfile
+    environment:
+      VENUE_ADDR: "${VENUE_ADDR}"
+      VENUE_API_KEY: "${VENUE_API_KEY}"
+      VENUE_READ_HEADER_TIMEOUT: "${VENUE_READ_HEADER_TIMEOUT}"
+      VENUE_WRITE_TIMEOUT: "${VENUE_WRITE_TIMEOUT}"
+      VENUE_IDLE_TIMEOUT: "${VENUE_IDLE_TIMEOUT}"
+      VENUE_SHUTDOWN_TIMEOUT: "${VENUE_SHUTDOWN_TIMEOUT}"
+      VENUE_SYNC_INTERVAL: "${VENUE_SYNC_INTERVAL}"
+      VENUE_PLATFORM_HTTP_TIMEOUT: "${VENUE_PLATFORM_HTTP_TIMEOUT}"
+      PLATFORM_URL: "http://platform:${PLATFORM_PORT}"
+    ports:
+      - "${VENUE_HOST_PORT}:${VENUE_PORT}"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "${VENUE_HEALTHCHECK_URL}"]
+      interval: "${HEALTHCHECK_INTERVAL}"
+      timeout: "${HEALTHCHECK_TIMEOUT}"
+      retries: ${HEALTHCHECK_RETRIES}
+    depends_on:
+      platform:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

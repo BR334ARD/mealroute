@@ -1,0 +1,84 @@
+@startuml
+title MealRoute — CJM заведения
+
+start
+:Запустить отдельный demo venue-сервис;
+
+fork
+  partition "Sync worker — интервал VENUE_SYNC_INTERVAL" {
+    repeat
+      :PUT /partner/v1/menu\n(X-Venue-API-Key, menuVersion);
+      if (Menu sync успешен?) then (да)
+        :Сохранить mapping\nexternalItemId ↔ productId;
+      else (нет)
+        :Записать ошибку;
+        note right
+          Ошибка menu sync не блокирует
+          чтение журнала заказов.
+        end note
+      endif
+
+      :Повторить события из локальной retry-очереди;
+      :GET /partner/v1/order-events\n(cursor, limit=100);
+      if (Страница получена?) then (да)
+        while (Есть следующее событие?) is (да)
+          if (eventId уже обработан?) then (да)
+            :Пропустить дубликат;
+          elseif (Не удалось сопоставить productId?) then (да)
+            :Положить событие в retry-очередь;
+          elseif (snapshot не новее локального?) then (да)
+            :Игнорировать устаревший snapshot\nи отметить eventId обработанным;
+          elseif (Это новый pending_confirmation?) then (да)
+            :Сохранить pending_confirmation локально;
+            :Показать заказ оператору для решения;
+            :Отметить eventId обработанным;
+          else (изменение заказа)
+            :Сохранить новый snapshot\n(включая cancelled и статусы кухни);
+            :Отметить eventId обработанным;
+          endif
+        endwhile (нет)
+        :Если получен nextCursor — сохранить его;
+        note right
+          Неуспешные события уже находятся в retry-очереди,
+          поэтому они не блокируют следующие события и cursor.
+          Cursor и retry-очередь in-memory: после рестарта
+          журнал безопасно воспроизводится с начала.
+        end note
+      else (ошибка polling)
+        :Сохранить прежний cursor\nи повторить на следующем цикле;
+      endif
+      :Подождать VENUE_SYNC_INTERVAL;
+    repeat while (Сервис работает?) is (да)
+  }
+fork again
+  partition "Оператор заведения" {
+    repeat
+      :GET /v1/orders\n(status, cursor, limit);
+      :Выбрать локальный заказ;
+      if (Нужно изменить статус?) then (да)
+        :POST /v1/orders/{venueOrderId}/status;
+        note right
+          Оператор явно принимает или отклоняет заказ:
+          accepted вызывает partner /accept,
+          rejected — /reject,
+          preparing..delivered — /status.
+        end note
+        if (Platform подтвердила команду?) then (да)
+          :Зафиксировать статус локально;
+          note right
+            Канонический snapshot позднее придёт
+            обратно через order-events.
+          end note
+        else (нет)
+          :Вернуть JSON ProblemDetails;
+          :Оставить локальный статус без изменений\nи разрешить безопасный повтор;
+        endif
+      else (нет)
+        :Продолжить просмотр заказов;
+      endif
+    repeat while (Сервис работает?) is (да)
+  }
+end fork
+
+stop
+@enduml

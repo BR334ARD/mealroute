@@ -1,0 +1,121 @@
+@startuml
+title MealRoute — PostgreSQL ER-диаграмма
+hide methods
+skinparam shadowing false
+skinparam linetype ortho
+
+entity venues {
+  *id : uuid <<PK>>
+  --
+  name : varchar
+  kind : varchar
+  city : varchar
+  status : varchar
+  is_open : boolean
+  menu_version : bigint
+}
+
+entity venue_api_keys {
+  *id : uuid <<PK>>
+  --
+  venue_id : uuid <<FK>>
+  key_fingerprint : char(64)
+  revoked_at : timestamptz?
+}
+
+entity menus {
+  *venue_id : uuid <<PK, FK>>
+  --
+  version : bigint
+  currency : char(3)
+  payload : jsonb
+}
+
+entity menu_categories {
+  *id : uuid <<PK>>
+  --
+  venue_id : uuid <<FK>>
+  external_category_id : varchar
+  name : varchar
+}
+
+entity menu_items {
+  *id : uuid <<PK>>
+  --
+  venue_id : uuid <<FK>>
+  category_id : uuid <<FK>>
+  external_item_id : varchar
+  price_amount : bigint
+  available : boolean
+}
+
+entity orders {
+  *id : uuid <<PK>>
+  --
+  venue_id : uuid <<FK>>
+  customer_id : varchar
+  venue_order_id : varchar?
+  status : varchar
+  payload : jsonb
+}
+
+entity order_items {
+  *order_id : uuid <<PK, FK>>
+  *line_no : smallint <<PK>>
+  --
+  product_id : uuid
+  quantity : integer
+  unit_price_amount : bigint
+}
+
+entity order_status_history {
+  *order_id : uuid <<PK, FK>>
+  *sequence_no : smallint <<PK>>
+  --
+  status : varchar
+  source : varchar
+  changed_at : timestamptz
+}
+
+entity idempotency_commands {
+  *subject : varchar <<PK>>
+  *operation : varchar <<PK>>
+  *idempotency_key : varchar <<PK>>
+  --
+  request_hash : char(64)
+  response_payload : jsonb
+  order_id : uuid <<FK>>
+}
+
+entity order_events {
+  *sequence_no : bigint <<PK>>
+  --
+  id : uuid <<UQ>>
+  venue_id : uuid <<FK>>
+  order_id : uuid <<FK>>
+  event_type : varchar
+  order_snapshot : jsonb
+}
+
+venues ||--o{ venue_api_keys
+venues ||--|| menus
+venues ||--o{ menu_categories
+venues ||--o{ menu_items
+menu_categories ||--o{ menu_items
+venues ||--o{ orders
+orders ||--o{ order_items
+orders ||--o{ order_status_history
+orders ||--o{ idempotency_commands
+venues ||--o{ order_events
+orders ||--o{ order_events
+
+note bottom of menus
+  payload — готовый публичный
+  снимок Menu для API
+end note
+
+note bottom of orders
+  payload — неизменяемый
+  снимок заказа для API/events
+end note
+@enduml

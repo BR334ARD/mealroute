@@ -1,0 +1,46 @@
+@startuml
+title MealRoute — C4 Level 2: containers
+left to right direction
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+
+actor "Пользователь" as customer
+actor "Сотрудник\nзаведения" as operator
+
+rectangle "Web-клиент\n(вне scope MVP)" as web #E3F2FD
+rectangle "MealRoute: Platform\nGo / net/http\n:8080" as platform #D5E8D4 {
+  rectangle "Customer API\n/api/v1/*" as customerAPI
+  rectangle "Partner API\n/partner/v1/*" as partnerAPI
+  rectangle "Application services\nзаказ, меню, статусы" as app
+  rectangle "PostgreSQL repository\npgx" as repository
+}
+database "PostgreSQL 16\nзаведения, меню, заказы,\nidempotency, order-events" as postgres #FFF2CC
+rectangle "Demo Venue\nGo / net/http\n:8081" as venue #F8CECC {
+  rectangle "Локальное API\n/v1/*" as venueAPI
+  rectangle "Sync worker\nmenu sync + polling" as worker
+  rectangle "Локальная read model\n(in-memory для MVP)" as readmodel
+}
+
+customer --> web : выбирает меню\nи оформляет заказ
+web --> customerAPI : HTTP/JSON\nX-User-Id
+operator --> venueAPI : проверяет и\nдвигает заказ
+customerAPI --> app
+partnerAPI --> app
+app --> repository
+repository --> postgres : SQL
+
+worker --> partnerAPI : HTTP/JSON\nменю, команды, polling events
+worker --> readmodel
+venueAPI --> readmodel
+
+note bottom of partnerAPI
+  X-Venue-API-Key + Idempotency-Key
+end note
+
+note bottom of worker
+  order-events: at-least-once;
+  eventId: дедупликация;
+  cursor: checkpoint
+end note
+@enduml

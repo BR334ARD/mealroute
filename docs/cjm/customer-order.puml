@@ -1,0 +1,77 @@
+@startuml
+title MealRoute — CJM пользователя
+
+start
+:Открыть каталог;
+:GET /api/v1/venues;
+:Выбрать заведение;
+:GET /api/v1/venues/{venueId}/menu;
+
+if (Заведение открыто и есть товары?) then (да)
+  :Собрать корзину и указать адрес;
+  :POST /api/v1/orders\n(X-User-Id, Idempotency-Key);
+  if (Заказ создан?) then (201)
+    :Получить pending_confirmation;
+    note right
+      Создание заказа не означает принятие заведением.
+      Venue узнаёт о заказе позднее через polling order-events.
+      Push-уведомлений в MVP нет: web-клиент опрашивает platform.
+      Таймаут pending_confirmation в MVP не реализован.
+    end note
+
+    repeat
+      :GET /api/v1/orders/{orderId};
+      if (Статус pending_confirmation?) then (да)
+        :Показать «Ожидаем подтверждения заведения»;
+        if (Пользователь хочет отменить?) then (да)
+          :POST /api/v1/orders/{orderId}/cancel\n(Idempotency-Key);
+          if (Platform зафиксировала отмену?) then (200)
+            :Показать cancelled;
+            note right
+              Venue узнает об отмене асинхронно
+              из следующего polling order-events.
+            end note
+            stop
+          else (409)
+            :Обновить заказ: состояние уже изменилось;
+          endif
+        else (нет)
+          :Подождать интервал polling web-клиента;
+        endif
+      endif
+    repeat while (Заказ всё ещё pending_confirmation?) is (да)
+
+    if (Статус rejected?) then (да)
+      :Показать rejected и причину;
+    else (accepted)
+      :Показать accepted и estimatedReadyAt;
+      repeat
+        :GET /api/v1/orders/{orderId};
+        if (Статус accepted?) then (да)
+          :Показать возможность отмены;
+          if (Пользователь отменяет?) then (да)
+            :POST /api/v1/orders/{orderId}/cancel\n(Idempotency-Key);
+            if (Отмена успела раньше кухни?) then (200)
+              :Показать cancelled;
+              stop
+            else (409)
+              :Обновить статус и продолжить отслеживание;
+            endif
+          endif
+        else (нет)
+          :Показать preparing, ready или delivering;
+        endif
+        :Подождать интервал polling web-клиента;
+      repeat while (Статус не delivered и не cancelled?) is (да)
+      :Показать delivered или cancelled;
+    endif
+  else (409 или 422)
+    :Показать изменение меню, цены, наличия\nили закрытие заведения;
+    :Обновить меню и корзину;
+  endif
+else (нет)
+  :Выбрать другое заведение\nили вернуться позже;
+endif
+
+stop
+@enduml

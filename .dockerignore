@@ -1,0 +1,7 @@
+.git
+.idea
+.env
+.env.*
+**/.tmp-gocache
+**/.tmp-gomodcache
+**/.tmp-tools

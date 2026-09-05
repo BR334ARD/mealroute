@@ -1,0 +1,8 @@
+package: venueapi
+output: internal/api/venue/openapi.gen.go
+generate:
+  models: true
+  std-http-server: true
+  embedded-spec: true
+output-options:
+  response-type-suffix: ResponseObject
