@@ -1,4 +1,13 @@
 services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: "${HEALTHCHECK_INTERVAL}"
+      timeout: "${HEALTHCHECK_TIMEOUT}"
+      retries: ${HEALTHCHECK_RETRIES}
+
   postgres:
     image: "${POSTGRES_IMAGE}"
     environment:
@@ -22,6 +31,9 @@ services:
       dockerfile: services/platform/Dockerfile
     environment:
       PLATFORM_ADDR: "${PLATFORM_ADDR}"
+      REDIS_URL: "redis://redis:6379/0"
+      MENU_CACHE_TTL: "${MENU_CACHE_TTL:-60s}"
+      REDIS_TIMEOUT: "${REDIS_TIMEOUT:-100ms}"
       PLATFORM_READ_HEADER_TIMEOUT: "${PLATFORM_READ_HEADER_TIMEOUT}"
       PLATFORM_WRITE_TIMEOUT: "${PLATFORM_WRITE_TIMEOUT}"
       PLATFORM_IDLE_TIMEOUT: "${PLATFORM_IDLE_TIMEOUT}"

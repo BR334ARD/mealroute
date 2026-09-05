@@ -22,6 +22,7 @@ import (
 
 type Service struct {
 	repository repository.Repository
+	menuCache  MenuCache
 	now        func() time.Time
 	newID      func() uuid.UUID
 }
@@ -102,6 +103,19 @@ func (s *Service) GetVenue(ctx context.Context, venueID uuid.UUID) (platformapi.
 }
 
 func (s *Service) GetMenu(ctx context.Context, venueID uuid.UUID) (platformapi.Menu, *domain.Error) {
+	cacheAvailable := s.menuCache != nil
+	if cacheAvailable {
+		venue, apiError := s.GetVenue(ctx, venueID)
+		if apiError != nil {
+			return platformapi.Menu{}, apiError
+		}
+		cached, found, err := s.menuCache.Get(ctx, venueID, venue.MenuVersion)
+		if err == nil && found && cached.VenueId == venueID && cached.Version == venue.MenuVersion {
+			return cached, nil
+		}
+		// Avoid a second cache timeout on the same request during an outage.
+		cacheAvailable = err == nil
+	}
 	menu, ok, err := s.repository.FindMenu(ctx, venueID)
 	if err != nil {
 		return platformapi.Menu{}, storageError(err)
@@ -110,6 +124,10 @@ func (s *Service) GetMenu(ctx context.Context, venueID uuid.UUID) (platformapi.M
 		return platformapi.Menu{}, domain.NewError("venue_not_found", "venue was not found")
 	}
 	menu.Categories = availableCategories(menu.Categories)
+	if cacheAvailable {
+		// Cache failure must not turn a successful database read into an API error.
+		_ = s.menuCache.Put(ctx, menu)
+	}
 	return menu, nil
 }
 

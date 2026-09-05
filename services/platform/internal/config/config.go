@@ -11,6 +11,9 @@ import (
 )
 
 type Config struct {
+	RedisURL          string
+	MenuCacheTTL      time.Duration
+	RedisTimeout      time.Duration
 	Addr              string
 	DatabaseURL       string
 	VenueID           uuid.UUID
@@ -22,6 +25,19 @@ type Config struct {
 }
 
 func Load() (Config, error) {
+	redisURL := strings.TrimSpace(os.Getenv("REDIS_URL"))
+	var cacheTTL, redisTimeout time.Duration
+	if redisURL != "" {
+		var err error
+		cacheTTL, err = requiredDuration("MENU_CACHE_TTL")
+		if err != nil {
+			return Config{}, err
+		}
+		redisTimeout, err = requiredDuration("REDIS_TIMEOUT")
+		if err != nil {
+			return Config{}, err
+		}
+	}
 	addr, err := required("PLATFORM_ADDR")
 	if err != nil {
 		return Config{}, err
@@ -62,6 +78,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return Config{
+		RedisURL:          redisURL,
+		MenuCacheTTL:      cacheTTL,
+		RedisTimeout:      redisTimeout,
 		Addr:              addr,
 		DatabaseURL:       databaseURL,
 		VenueID:           venueID,

@@ -10,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	rediscache "mealroute/platform/internal/cache/redis"
+
 	"mealroute/platform/internal/config"
 	"mealroute/platform/internal/httpapi"
 	"mealroute/platform/internal/repository/postgres"
@@ -36,7 +38,16 @@ func run() error {
 	if err := store.ConfigureVenueAPIKey(ctx, runtimeConfig.VenueID, runtimeConfig.VenueAPIKey); err != nil {
 		return fmt.Errorf("configure venue API key: %w", err)
 	}
-	router, err := httpapi.NewRouter(service.New(store))
+	application := service.New(store)
+	if runtimeConfig.RedisURL != "" {
+		cache, err := rediscache.New(runtimeConfig.RedisURL, runtimeConfig.MenuCacheTTL, runtimeConfig.RedisTimeout)
+		if err != nil {
+			return fmt.Errorf("configure menu cache: %w", err)
+		}
+		defer func() { _ = cache.Close() }()
+		application = service.NewWithMenuCache(store, cache)
+	}
+	router, err := httpapi.NewRouter(application)
 	if err != nil {
 		return fmt.Errorf("build HTTP router: %w", err)
 	}

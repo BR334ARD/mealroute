@@ -16,6 +16,7 @@ rectangle "MealRoute: Platform\nGo / net/http\n:8080" as platform #D5E8D4 {
   rectangle "PostgreSQL repository\npgx" as repository
 }
 database "PostgreSQL 16\nзаведения, меню, заказы,\nidempotency, order-events" as postgres #FFF2CC
+database "Redis 7.4\nПубличное меню по версии\nTTL, необязательный кэш" as redis #FFF2CC
 rectangle "Demo Venue\nGo / net/http\n:8081" as venue #F8CECC {
   rectangle "Локальное API\n/v1/*" as venueAPI
   rectangle "Sync worker\nmenu sync + polling" as worker
@@ -28,6 +29,7 @@ operator --> venueAPI : проверяет и\nдвигает заказ
 customerAPI --> app
 partnerAPI --> app
 app --> repository
+app --> redis : GET / SET с TTL\nсбой → PostgreSQL
 repository --> postgres : SQL
 
 worker --> partnerAPI : HTTP/JSON\nменю, команды, polling events
