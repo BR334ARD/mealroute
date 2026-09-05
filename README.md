@@ -28,7 +28,8 @@ Docker Compose. Redis хранит необязательный кэш публ�
 
 Требования: Docker Desktop с Docker Compose v2.
 
-Runtime-конфигурация не зашита в Go, миграции или Compose. Перед первым запуском
+Настраиваемые runtime-параметры описаны в `.env.example`; Compose также задаёт
+внутренний адрес Redis и значения по умолчанию для кэша. Перед первым запуском
 создайте локальный `.env` из безопасного шаблона и при необходимости замените
 локальные credentials:
 
@@ -46,6 +47,7 @@ PowerShell: `Copy-Item .env.example .env`.
 | Platform | `http://localhost:8080` | API платформы |
 | Demo Venue | `http://localhost:8081` | API отдельного заведения |
 | PostgreSQL | `localhost:5432` | Хранилище platform |
+| Redis | Только внутри Compose: `redis:6379` | Необязательный кэш публичного меню |
 
 Проверка готовности:
 
@@ -265,6 +267,55 @@ Workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) выполняет
 для обоих модулей, unit-тесты с race detector, `go vet`, затем поднимает чистый
 Compose и запускает PostgreSQL- и cross-service-тесты. При ошибке сохраняются
 логи контейнеров.
+
+### Проверка Redis
+
+Redis запускается вместе с приложением командой `docker compose up -d --build --wait`.
+Настройки кэша:
+
+| Параметр | В Compose | Назначение |
+| --- | --- | --- |
+| `REDIS_URL` | `redis://redis:6379/0` | Внутренний адрес, заданный Compose; пустое значение отключает кэш при запуске Go-сервиса вне Compose |
+| `MENU_CACHE_TTL` | `60s` по умолчанию | Срок жизни снимка меню |
+| `REDIS_TIMEOUT` | `100ms` по умолчанию | Таймаут одной операции с кэшем |
+
+Smoke-проверка для стандартного demo-заведения в PowerShell (при изменении
+`VENUE_ID` замените идентификатор в URL):
+
+```powershell
+$menuUrl = 'http://localhost:8080/api/v1/venues/00000000-0000-0000-0000-000000000001/menu'
+docker compose exec -T redis redis-cli PING
+Invoke-RestMethod $menuUrl
+Invoke-RestMethod $menuUrl
+docker compose exec -T redis redis-cli --scan --pattern 'mealroute:public-menu:v1:*'
+```
+
+Ожидается `PONG`, два успешных ответа с меню и ключ с текущей версией меню.
+Для проверки TTL передайте найденный ключ в
+`docker compose exec -T redis redis-cli TTL <ключ>`: сразу после записи значение
+должно быть положительным и не превышать настроенный TTL в секундах.
+
+Проверка fallback на локальном окружении временно отключает Redis; `finally`
+запускает его снова, даже если HTTP-запрос завершится ошибкой:
+
+```powershell
+docker compose stop redis
+try {
+    Invoke-RestMethod $menuUrl
+} finally {
+    docker compose start redis
+}
+```
+
+Меню должно остаться доступным из PostgreSQL. Эта проверка не удаляет данные БД.
+После запуска Redis следующий запрос снова заполняет кэш.
+
+Автоматические service-тесты проверяют cache hit, выбор новой версии после
+partner menu sync, запоздавшую запись старого снимка, fallback при ошибках чтения
+и записи, а также обход кэша при оформлении заказа. Они используют тестовый
+кэш, не настоящий Redis. Compose-интеграция проверяет бизнес-сценарии с поднятой
+инфраструктурой; TTL, восстановление повреждённой записи и отказ Redis отдельно
+проверялись вручную на реальном контейнере Redis.
 
 ## Граница эксплуатационной готовности
 
